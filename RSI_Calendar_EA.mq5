@@ -56,7 +56,8 @@ input int    MartingaleStartAfter = 1;         // Start Martingale After X Losse
 
 //--- FILTERS ---
 input int    MaxOrdersPerDay  = 3;             // Max Orders Per Day
-input int    MinMinutesBetween = 5;            // Wait Time After Close to Open New Order (Minutes)
+input int    MinMinutesAfterTP = 5;            // Wait Time After TP (Minutes)
+input int    MinMinutesAfterSL = 1;            // Wait Time After SL (Minutes)
 input bool   CloseOnTrendChange = false;       // Close Order When Trend Changes (requires D1>=2)
 
 //--- DAILY TP LIMIT ---
@@ -80,6 +81,7 @@ int            g_digits;
 double         g_pipValue;
 int            g_ordersToday = 0;
 datetime       g_lastTradeTime = 0;
+bool           g_lastTradeWasTP = true;   // true=TP, false=SL
 datetime       g_lastDay = 0;
 
 // Trend variables
@@ -228,6 +230,7 @@ void OnTradeTransaction(const MqlTradeTransaction &trans,
          
          // Luu thoi gian dong lenh de tinh thoi gian cho
          g_lastTradeTime = TimeCurrent();
+         g_lastTradeWasTP = true;  // Danh dau la TP
          
          // Kiem tra TP limit
          if(UseTPLimit && g_tpCountToday >= TPLimitPerDay)
@@ -255,6 +258,7 @@ void OnTradeTransaction(const MqlTradeTransaction &trans,
          
          // Luu thoi gian dong lenh de tinh thoi gian cho
          g_lastTradeTime = TimeCurrent();
+         g_lastTradeWasTP = false;  // Danh dau la SL
          
          if(g_loseStreak >= MaxMartingaleLevel)
          {
@@ -553,7 +557,8 @@ bool CanTrade()
    {
       datetime currentTime = TimeCurrent();
       int minutesPassed = (int)((currentTime - g_lastTradeTime) / 60);
-      if(minutesPassed < MinMinutesBetween)
+      int minWait = g_lastTradeWasTP ? MinMinutesAfterTP : MinMinutesAfterSL;
+      if(minutesPassed < minWait)
          return false;
    }
    
