@@ -64,6 +64,10 @@ input bool   CloseOnTrendChange = false;       // Close Order When Trend Changes
 input bool   UseTPLimit       = false;         // Enable Daily TP Limit
 input int    TPLimitPerDay    = 3;             // TP Count to Stop EA
 
+//--- VIRTUAL TRADES (LOSS AVOIDANCE) ---
+input bool   UseVirtualTrades = false;         // Enable Virtual Trades Mode
+input int    VirtualLossesToSkip = 3;          // Virtual Losses Before Real Trade
+
 //--- DISPLAY ---
 input bool   ShowPanel        = true;          // Show Panel
 input color  PanelColor       = clrWhite;      // Panel Text Color
@@ -109,6 +113,16 @@ double         g_maxLotUsed = 0;     // Lot lon nhat da vao lenh
 // TP Limit trong ngay
 int            g_tpCountToday = 0;   // So lan TP trong ngay
 bool           g_eaStopped = false;  // EA da dung do dat TP limit
+
+// Virtual Trades (lenh ao)
+bool           g_virtualTradeActive = false;  // Dang co lenh ao
+int            g_virtualTradeType = 0;        // 1=BUY, -1=SELL
+double         g_virtualEntryPrice = 0;       // Gia vao lenh ao
+double         g_virtualTP = 0;               // TP cua lenh ao
+double         g_virtualSL = 0;               // SL cua lenh ao
+int            g_virtualLossCount = 0;        // So lenh ao thua lien tiep
+datetime       g_virtualStartTime = 0;        // Thoi gian bat dau lenh ao
+int            g_virtualZoneCount = 0;        // Dem so vung da ve
 
 // Calendar
 int            g_calendarTrend[31];  // Trend cua tung ngay trong thang (-1, 0, 1)
@@ -174,6 +188,10 @@ void OnDeinit(const int reason)
    ObjectsDeleteAll(0, "RSI_Panel_");
    ObjectsDeleteAll(0, "Cal_");
    ObjectsDeleteAll(0, "DaySep_");
+   ObjectsDeleteAll(0, "VirtualTP_");
+   ObjectsDeleteAll(0, "VirtualSL_");
+   ObjectsDeleteAll(0, "VirtualEntry_");
+   ObjectsDeleteAll(0, "VirtualLabel_");
    Print("=== RSI Calendar EA da dung ===");
    Print("Thong ke: Thang=", g_winCount, " Thua=", g_loseCount);
 }
@@ -231,6 +249,13 @@ void OnTradeTransaction(const MqlTradeTransaction &trans,
          // Luu thoi gian dong lenh de tinh thoi gian cho
          g_lastTradeTime = TimeCurrent();
          g_lastTradeWasTP = true;  // Danh dau la TP
+         
+         // Reset che do lenh ao khi lenh that TP
+         if(UseVirtualTrades)
+         {
+            g_virtualLossCount = 0;
+            Print(">>> VIRTUAL RESET: Real trade TP - Reset virtual count to 0");
+         }
          
          // Kiem tra TP limit
          if(UseTPLimit && g_tpCountToday >= TPLimitPerDay)
@@ -315,12 +340,17 @@ void OnTick()
    if(UseTrailingStop)
       ManageTrailingStop();
    
+   // Kiem tra lenh ao (neu co)
+   if(UseVirtualTrades)
+      CheckVirtualTrade();
+   
    // Dong lenh khi xu huong thay doi (chi hoat dong khi TrendDayShift >= 2)
    if(CloseOnTrendChange && TrendDayShift >= 2)
       CheckAndCloseOnTrendChange(trend);
    
    // Kiem tra da co lenh nao chua - EA chi mo 1 lenh duy nhat
-   if(HasAnyPosition())
+   // Bao gom ca lenh that va lenh ao
+   if(HasAnyPosition() || g_virtualTradeActive)
       return;
    
    // Logic giao dich
@@ -621,10 +651,183 @@ double CalculateMartingaleLot()
 }
 
 //+------------------------------------------------------------------+
+//| Kiem tra va xu ly lenh ao                                        |
+//+------------------------------------------------------------------+
+void CheckVirtualTrade()
+{
+   if(!g_virtualTradeActive)
+      return;
+   
+   double bid = SymbolInfoDouble(_Symbol, SYMBOL_BID);
+   double ask = SymbolInfoDouble(_Symbol, SYMBOL_ASK);
+   
+   if(g_virtualTradeType == 1)  // Virtual BUY
+   {
+      // BUY: TP khi bid >= g_virtualTP, SL khi bid <= g_virtualSL
+      if(g_virtualTP > 0 && bid >= g_virtualTP)
+      {
+         // Virtual TP - Reset
+         Print(">>> VIRTUAL BUY TP! Entry=", g_virtualEntryPrice, " Exit=", bid);
+         DrawVirtualTradeZone(1, g_virtualEntryPrice, g_virtualTP, g_virtualSL, g_virtualStartTime, TimeCurrent(), true);
+         g_virtualLossCount = 0;
+         g_virtualTradeActive = false;
+         g_lastTradeTime = TimeCurrent();
+         g_lastTradeWasTP = true;
+      }
+      else if(g_virtualSL > 0 && bid <= g_virtualSL)
+      {
+         // Virtual SL - Tang dem
+         g_virtualLossCount++;
+         Print(">>> VIRTUAL BUY SL! Entry=", g_virtualEntryPrice, " Exit=", bid, " VirtualLoss=", g_virtualLossCount, "/", VirtualLossesToSkip);
+         DrawVirtualTradeZone(1, g_virtualEntryPrice, g_virtualTP, g_virtualSL, g_virtualStartTime, TimeCurrent(), false);
+         g_virtualTradeActive = false;
+         g_lastTradeTime = TimeCurrent();
+         g_lastTradeWasTP = false;
+      }
+   }
+   else if(g_virtualTradeType == -1)  // Virtual SELL
+   {
+      // SELL: TP khi ask <= g_virtualTP, SL khi ask >= g_virtualSL
+      if(g_virtualTP > 0 && ask <= g_virtualTP)
+      {
+         // Virtual TP - Reset
+         Print(">>> VIRTUAL SELL TP! Entry=", g_virtualEntryPrice, " Exit=", ask);
+         DrawVirtualTradeZone(-1, g_virtualEntryPrice, g_virtualTP, g_virtualSL, g_virtualStartTime, TimeCurrent(), true);
+         g_virtualLossCount = 0;
+         g_virtualTradeActive = false;
+         g_lastTradeTime = TimeCurrent();
+         g_lastTradeWasTP = true;
+      }
+      else if(g_virtualSL > 0 && ask >= g_virtualSL)
+      {
+         // Virtual SL - Tang dem
+         g_virtualLossCount++;
+         Print(">>> VIRTUAL SELL SL! Entry=", g_virtualEntryPrice, " Exit=", ask, " VirtualLoss=", g_virtualLossCount, "/", VirtualLossesToSkip);
+         DrawVirtualTradeZone(-1, g_virtualEntryPrice, g_virtualTP, g_virtualSL, g_virtualStartTime, TimeCurrent(), false);
+         g_virtualTradeActive = false;
+         g_lastTradeTime = TimeCurrent();
+         g_lastTradeWasTP = false;
+      }
+   }
+}
+
+//+------------------------------------------------------------------+
+//| Ve vung lenh ao tren bieu do                                     |
+//+------------------------------------------------------------------+
+void DrawVirtualTradeZone(int tradeType, double entryPrice, double tp, double sl, datetime startTime, datetime endTime, bool isTP)
+{
+   g_virtualZoneCount++;
+   string suffix = IntegerToString(g_virtualZoneCount);
+   
+   // Ve vung TP (xanh)
+   string tpZoneName = "VirtualTP_" + suffix;
+   ObjectCreate(0, tpZoneName, OBJ_RECTANGLE, 0, startTime, entryPrice, endTime, tp);
+   ObjectSetInteger(0, tpZoneName, OBJPROP_COLOR, clrLime);
+   ObjectSetInteger(0, tpZoneName, OBJPROP_FILL, true);
+   ObjectSetInteger(0, tpZoneName, OBJPROP_BACK, true);
+   ObjectSetInteger(0, tpZoneName, OBJPROP_WIDTH, 1);
+   ObjectSetInteger(0, tpZoneName, OBJPROP_SELECTABLE, false);
+   
+   // Ve vung SL (do)
+   string slZoneName = "VirtualSL_" + suffix;
+   ObjectCreate(0, slZoneName, OBJ_RECTANGLE, 0, startTime, entryPrice, endTime, sl);
+   ObjectSetInteger(0, slZoneName, OBJPROP_COLOR, clrRed);
+   ObjectSetInteger(0, slZoneName, OBJPROP_FILL, true);
+   ObjectSetInteger(0, slZoneName, OBJPROP_BACK, true);
+   ObjectSetInteger(0, slZoneName, OBJPROP_WIDTH, 1);
+   ObjectSetInteger(0, slZoneName, OBJPROP_SELECTABLE, false);
+   
+   // Ve duong entry (vang)
+   string entryLineName = "VirtualEntry_" + suffix;
+   ObjectCreate(0, entryLineName, OBJ_TREND, 0, startTime, entryPrice, endTime, entryPrice);
+   ObjectSetInteger(0, entryLineName, OBJPROP_COLOR, clrYellow);
+   ObjectSetInteger(0, entryLineName, OBJPROP_STYLE, STYLE_DASH);
+   ObjectSetInteger(0, entryLineName, OBJPROP_WIDTH, 1);
+   ObjectSetInteger(0, entryLineName, OBJPROP_RAY_RIGHT, false);
+   ObjectSetInteger(0, entryLineName, OBJPROP_SELECTABLE, false);
+   
+   // Ve nhan ket qua
+   string labelName = "VirtualLabel_" + suffix;
+   string labelText = isTP ? "V-TP" : "V-SL";
+   color labelColor = isTP ? clrLime : clrRed;
+   ObjectCreate(0, labelName, OBJ_TEXT, 0, endTime, isTP ? tp : sl);
+   ObjectSetString(0, labelName, OBJPROP_TEXT, labelText);
+   ObjectSetString(0, labelName, OBJPROP_FONT, "Arial Bold");
+   ObjectSetInteger(0, labelName, OBJPROP_FONTSIZE, 8);
+   ObjectSetInteger(0, labelName, OBJPROP_COLOR, labelColor);
+   ObjectSetInteger(0, labelName, OBJPROP_SELECTABLE, false);
+}
+
+//+------------------------------------------------------------------+
+//| Mo lenh ao Buy                                                   |
+//+------------------------------------------------------------------+
+void OpenVirtualBuy()
+{
+   double ask = SymbolInfoDouble(_Symbol, SYMBOL_ASK);
+   g_virtualEntryPrice = ask;
+   g_virtualSL = StopLossPips > 0 ? ask - StopLossPips * g_pipValue : 0;
+   g_virtualTP = TakeProfitPips > 0 ? ask + TakeProfitPips * g_pipValue : 0;
+   g_virtualTradeType = 1;
+   g_virtualTradeActive = true;
+   g_virtualStartTime = TimeCurrent();
+   
+   Print(">>> VIRTUAL BUY #", (g_virtualLossCount + 1), "/", VirtualLossesToSkip, " Entry=", ask, " SL=", g_virtualSL, " TP=", g_virtualTP);
+   g_ordersToday++;
+}
+
+//+------------------------------------------------------------------+
+//| Mo lenh ao Sell                                                  |
+//+------------------------------------------------------------------+
+void OpenVirtualSell()
+{
+   double bid = SymbolInfoDouble(_Symbol, SYMBOL_BID);
+   g_virtualEntryPrice = bid;
+   g_virtualSL = StopLossPips > 0 ? bid + StopLossPips * g_pipValue : 0;
+   g_virtualTP = TakeProfitPips > 0 ? bid - TakeProfitPips * g_pipValue : 0;
+   g_virtualTradeType = -1;
+   g_virtualTradeActive = true;
+   g_virtualStartTime = TimeCurrent();
+   
+   Print(">>> VIRTUAL SELL #", (g_virtualLossCount + 1), "/", VirtualLossesToSkip, " Entry=", bid, " SL=", g_virtualSL, " TP=", g_virtualTP);
+   g_ordersToday++;
+}
+
+//+------------------------------------------------------------------+
+//| Kiem tra co nen mo lenh that khong (da du lenh ao thua)          |
+//+------------------------------------------------------------------+
+bool CanOpenRealTrade()
+{
+   if(!UseVirtualTrades)
+      return true;  // Khong dung che do ao -> luon mo lenh that
+   
+   return (g_virtualLossCount >= VirtualLossesToSkip);
+}
+
+//+------------------------------------------------------------------+
+//| Xoa tat ca vung lenh ao tren bieu do                             |
+//+------------------------------------------------------------------+
+void ClearVirtualZones()
+{
+   ObjectsDeleteAll(0, "VirtualTP_");
+   ObjectsDeleteAll(0, "VirtualSL_");
+   ObjectsDeleteAll(0, "VirtualEntry_");
+   ObjectsDeleteAll(0, "VirtualLabel_");
+   g_virtualZoneCount = 0;
+   ChartRedraw(0);
+}
+
+//+------------------------------------------------------------------+
 //| Mo lenh Buy                                                      |
 //+------------------------------------------------------------------+
 void OpenBuy()
 {
+   // Kiem tra che do lenh ao
+   if(UseVirtualTrades && !CanOpenRealTrade())
+   {
+      OpenVirtualBuy();
+      return;
+   }
+   
    double ask = SymbolInfoDouble(_Symbol, SYMBOL_ASK);
    double sl = StopLossPips > 0 ? ask - StopLossPips * g_pipValue : 0;
    double tp = TakeProfitPips > 0 ? ask + TakeProfitPips * g_pipValue : 0;
@@ -642,7 +845,11 @@ void OpenBuy()
       if(g_currentLot > g_maxLotUsed)
          g_maxLotUsed = g_currentLot;
       
-      Print(">>> MO LENH BUY: Lot=", g_currentLot, " SL=", sl, " TP=", tp, " Ticket=", g_lastTicket);
+      // Xoa vung lenh ao khi vao lenh that
+      if(UseVirtualTrades)
+         ClearVirtualZones();
+      
+      Print(">>> REAL BUY: Lot=", g_currentLot, " SL=", sl, " TP=", tp, " Ticket=", g_lastTicket);
       g_ordersToday++;
    }
    else
@@ -656,6 +863,13 @@ void OpenBuy()
 //+------------------------------------------------------------------+
 void OpenSell()
 {
+   // Kiem tra che do lenh ao
+   if(UseVirtualTrades && !CanOpenRealTrade())
+   {
+      OpenVirtualSell();
+      return;
+   }
+   
    double bid = SymbolInfoDouble(_Symbol, SYMBOL_BID);
    double sl = StopLossPips > 0 ? bid + StopLossPips * g_pipValue : 0;
    double tp = TakeProfitPips > 0 ? bid - TakeProfitPips * g_pipValue : 0;
@@ -673,7 +887,11 @@ void OpenSell()
       if(g_currentLot > g_maxLotUsed)
          g_maxLotUsed = g_currentLot;
       
-      Print(">>> MO LENH SELL: Lot=", g_currentLot, " SL=", sl, " TP=", tp, " Ticket=", g_lastTicket);
+      // Xoa vung lenh ao khi vao lenh that
+      if(UseVirtualTrades)
+         ClearVirtualZones();
+      
+      Print(">>> REAL SELL: Lot=", g_currentLot, " SL=", sl, " TP=", tp, " Ticket=", g_lastTicket);
       g_ordersToday++;
    }
    else
@@ -797,6 +1015,17 @@ void CreatePanel()
       y += lineHeight;
       
       CreateLabel("RSI_Panel_LoseStreak", "Current Streak: W0 / L0 | Lot: " + DoubleToString(LotSize, 2), x, y, PanelColor, 10);
+      y += lineHeight;
+   }
+   
+   // Virtual Trades info
+   if(UseVirtualTrades)
+   {
+      string virtualInfo = "Virtual Mode: Skip " + IntegerToString(VirtualLossesToSkip) + " losses before real trade";
+      CreateLabel("RSI_Panel_Virtual", virtualInfo, x, y, clrMagenta, 10);
+      y += lineHeight;
+      
+      CreateLabel("RSI_Panel_VirtualStatus", "Virtual: 0/" + IntegerToString(VirtualLossesToSkip) + " -> NEXT: VIRTUAL", x, y, clrMagenta, 10);
       y += lineHeight;
    }
    
@@ -960,6 +1189,32 @@ void UpdatePanel(double rsi, int trend)
       string streakText = "Streak: W" + IntegerToString(g_winStreak) + " / L" + IntegerToString(g_loseStreak) + " | Lot: " + DoubleToString(nextLot, 2) + martStatus;
       ObjectSetString(0, "RSI_Panel_LoseStreak", OBJPROP_TEXT, streakText);
       ObjectSetInteger(0, "RSI_Panel_LoseStreak", OBJPROP_COLOR, loseColor);
+   }
+   
+   // Virtual Trades info
+   if(UseVirtualTrades)
+   {
+      string nextType = (g_virtualLossCount >= VirtualLossesToSkip) ? "REAL" : "VIRTUAL";
+      string virtualTradeInfo = "";
+      color virtualColor = clrMagenta;
+      
+      if(g_virtualTradeActive)
+      {
+         // Dang co lenh ao
+         string vType = (g_virtualTradeType == 1) ? "BUY" : "SELL";
+         double currentPrice = (g_virtualTradeType == 1) ? SymbolInfoDouble(_Symbol, SYMBOL_BID) : SymbolInfoDouble(_Symbol, SYMBOL_ASK);
+         double vProfit = (g_virtualTradeType == 1) ? (currentPrice - g_virtualEntryPrice) / g_pipValue : (g_virtualEntryPrice - currentPrice) / g_pipValue;
+         virtualTradeInfo = "VIRTUAL " + vType + " Active | P/L: " + DoubleToString(vProfit, 1) + " pips";
+         virtualColor = vProfit >= 0 ? clrLime : clrRed;
+      }
+      else
+      {
+         virtualTradeInfo = "Virtual: " + IntegerToString(g_virtualLossCount) + "/" + IntegerToString(VirtualLossesToSkip) + " -> NEXT: " + nextType;
+         virtualColor = (nextType == "REAL") ? clrLime : clrMagenta;
+      }
+      
+      ObjectSetString(0, "RSI_Panel_VirtualStatus", OBJPROP_TEXT, virtualTradeInfo);
+      ObjectSetInteger(0, "RSI_Panel_VirtualStatus", OBJPROP_COLOR, virtualColor);
    }
    
    // Win/Lose stats
