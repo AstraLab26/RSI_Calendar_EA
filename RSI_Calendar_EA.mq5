@@ -60,6 +60,13 @@ input int    MinMinutesAfterTP = 5;            // Wait Time After TP (Minutes)
 input int    MinMinutesAfterSL = 1;            // Wait Time After SL (Minutes)
 input bool   CloseOnTrendChange = false;       // Close Order When Trend Changes (requires D1>=2)
 
+//--- TRADING HOURS (Gio giao dich) ---
+input bool   UseTradingHours   = true;         // Bat/Tat gioi han gio giao dich
+input int    StartHour         = 7;            // Gio bat dau (0-23)
+input int    StartMinute       = 0;            // Phut bat dau (0-59)
+input int    EndHour           = 23;           // Gio ket thuc (0-23)
+input int    EndMinute         = 0;            // Phut ket thuc (0-59)
+
 //--- DAILY TP LIMIT ---
 input bool   UseTPLimit       = false;         // Enable Daily TP Limit
 input int    TPLimitPerDay    = 3;             // TP Count to Stop EA
@@ -228,15 +235,18 @@ void OnTradeTransaction(const MqlTradeTransaction &trans,
       double dealCommission = HistoryDealGetDouble(dealTicket, DEAL_COMMISSION);
       double totalProfit = dealProfit + dealSwap + dealCommission;
       
-      if(totalProfit >= 0)
+      // Dung dealProfit > 0 de xac dinh TP (khong bi anh huong boi commission/swap)
+      // Neu dealProfit > 0 nghia la gia chay dung huong -> TP
+      // Neu dealProfit <= 0 nghia la gia chay nguoc -> SL
+      if(dealProfit > 0)
       {
-         // THANG - Reset ve lot goc cho lenh tiep theo
+         // THANG (TP) - Reset Martingale ve 0, lenh tiep theo dung lot goc
          g_winCount++;
          g_winStreak++;
-         g_loseStreak = 0;  // LUON reset ve 0 khi thang -> lenh tiep theo dung lot goc
+         g_loseStreak = 0;  // LUON reset ve 0 khi TP -> lenh tiep theo la lenh thu (lot goc)
          g_tpCountToday++;  // Tang dem TP trong ngay
          
-         // Cap nhat lai lon nhat
+         // Cap nhat lai lon nhat (dung totalProfit de hien thi thuc te)
          if(totalProfit > g_maxProfit)
             g_maxProfit = totalProfit;
          
@@ -313,6 +323,10 @@ void OnTick()
    if(g_eaStopped)
       return;
    
+   // Kiem tra khung gio giao dich
+   if(!IsWithinTradingHours())
+      return;
+   
    // Lay RSI (can 2 gia tri de kiem tra cat len/xuong)
    if(CopyBuffer(g_rsiHandle, 0, 0, 3, g_rsiBuffer) < 3)
       return;
@@ -369,6 +383,35 @@ void OnTick()
       OpenSell();
       return;
    }
+}
+
+//+------------------------------------------------------------------+
+//| Kiem tra co trong khung gio giao dich khong                      |
+//| Tra ve true neu dang trong khung gio cho phep                    |
+//+------------------------------------------------------------------+
+bool IsWithinTradingHours()
+{
+   if(!UseTradingHours) return true; // Khong gioi han gio
+   
+   MqlDateTime now;
+   TimeToStruct(TimeCurrent(), now);
+   
+   int currentMinutes = now.hour * 60 + now.min;
+   int startMinutes = StartHour * 60 + StartMinute;
+   int endMinutes = EndHour * 60 + EndMinute;
+   
+   // Truong hop binh thuong: Start < End (vi du 7:00 - 23:00)
+   if(startMinutes < endMinutes)
+   {
+      return (currentMinutes >= startMinutes && currentMinutes < endMinutes);
+   }
+   // Truong hop qua dem: Start > End (vi du 22:00 - 06:00)
+   else if(startMinutes > endMinutes)
+   {
+      return (currentMinutes >= startMinutes || currentMinutes < endMinutes);
+   }
+   // Start == End: luon cho phep
+   return true;
 }
 
 //+------------------------------------------------------------------+
@@ -582,14 +625,30 @@ bool CanTrade()
    if(g_ordersToday >= MaxOrdersPerDay)
       return false;
    
-   // Kiem tra thoi gian toi thieu sau khi dong lenh (tinh bang phut)
+   // Kiem tra thoi gian toi thieu sau khi dong lenh (tinh bang GIAY roi chuyen sang PHUT)
    if(g_lastTradeTime > 0)
    {
       datetime currentTime = TimeCurrent();
-      int minutesPassed = (int)((currentTime - g_lastTradeTime) / 60);
+      long secondsPassed = (long)(currentTime - g_lastTradeTime);
+      int minutesPassed = (int)(secondsPassed / 60);
       int minWait = g_lastTradeWasTP ? MinMinutesAfterTP : MinMinutesAfterSL;
+      
       if(minutesPassed < minWait)
+      {
+         // Debug: In ra de kiem tra (chi print moi 1 phut de tranh spam)
+         static datetime lastPrint = 0;
+         if(currentTime - lastPrint >= 60)
+         {
+            Print(">>> WAITING: ", minutesPassed, "/", minWait, " phut sau ", 
+                  (g_lastTradeWasTP ? "TP" : "SL"), " - Con ", (minWait - minutesPassed), " phut nua");
+            lastPrint = currentTime;
+         }
          return false;
+      }
+      else
+      {
+         Print(">>> READY: Da cho du ", minutesPassed, " phut (yeu cau ", minWait, " phut) - San sang vao lenh");
+      }
    }
    
    return true;
